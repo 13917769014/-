@@ -7,7 +7,8 @@ interface
 uses
   Windows, Messages, SysUtils, Classes, Graphics, ComCtrls, Controls, Forms,
   Dialogs, Buttons, ExtCtrls, Menus, AxCtrls, OleCtrls, DbOleCtl, Math, UCSList,
-  ImgeditLibCtl_TLB, ShareImgThumbnail, ShareMagnifier, ShareMag,//IMAGXPR6Lib_TLB;
+  ImgeditLibCtl_TLB, ShareImgThumbnail, ShareMagnifier, ShareMag,
+  IdHTTP, IdBaseComponent, IdComponent, IdTCPConnection, IdTCPClient, IdFTP,
   {$IFDEF XPress6}IMAGXPR6Lib_TLB{$Else}ImagXpr7_TLB{$ENDIF};
 
 
@@ -71,6 +72,7 @@ type
     FPartParent:TWinControl;
     FPartThumbnailMargin:Integer;
     FPartLabelVisible:Boolean;
+    FLabelVisible:Boolean;
 
     FImgControl : TImgControl;    //显示控件，现提供imgedit和imagxpress
     FUseBuffer : Boolean;         //显示时是否使用buffer，使用的话，每显示一页，则读取前一页和后一页影像在后台打开
@@ -88,12 +90,14 @@ type
     FRow:Integer;                 //当前的缩略图的行数
     FCol:Integer;                 //当前的缩略图的列数
     FThumbMargin:Integer;         //缩略图之间的间隔
+    FThumbBorderWidth:integer;    //缩略图的边框大小
     FThumbSelected:TShareImgThumbnail;  //当前选中的缩略图
 
     FThumbColor:TColor;                 //当前选中的缩略图的颜色
     FThumbList:TList;                   //当前的所有的缩略图列表
 
     FImgList:TStringList;          //所有的影像文件名的列表
+    FFtpList:TStringList;          //所有的FTP的IP，Port，User，Pass列表，解析FTP影像时用
     FPages:Integer;                //根据影像数和每页显示的缩略图数得出的总页数
     FCurrentPage:Integer;          //当前是第几页
 
@@ -111,6 +115,7 @@ type
     FXPressMagnifier:TShareMag;
     FMagnifierParent:TWinControl;
     FLabelAlign : TLabelAlign;
+    FLoadThumbnail:integer;  //是否使用缩略图显示
 
     FSynColor:Boolean;
     FSynLabelColor:Boolean;
@@ -134,9 +139,23 @@ type
 
     FViewMiddleLine:Boolean;  //是否显示中线
     FMiddleLineType:integer;  //中线的类型 ，0为纵向，1为横向
+
+    FidFtp:TidFtp;//用来显示FTP影像
+    FidHttp:TidHttp;//用来显示Http影像
+    FNeedDownToTemp:Boolean;//是否需要下载到本地临时目录
+    FShowSCSError:Boolean; //内容服务器影像下载失败时，是否错误信息
+    FDownSCSByPage:Boolean;//显示内容服务器影像时，是按照页缓冲还是单张缓冲
+    FDefFtpPort:integer;//FTP默认端口
+    FFtpTimeOut:integer;//Ftp超时时间
+    FHttpTimeOut:integer;//Http超时时间
+    FSCSTimeOut:integer;//SCS超时时间
+    FSCSIP:string;//SCS的IP  ---SCS=ShareContentServer
+    FSCSPort:integer;//SCS的Port ---SCS=ShareContentServer
+
     procedure OnlvKeyDown(Sender: TObject; var Key: Word; Shift: TShiftState);
     procedure CreateThumbnail(AParent:TWinControl);     //创建缩略图，并设置缩略图列表
     procedure SetImgList(AImgList: TStringList);
+    procedure SetFtpList(AFtpList: TStringList);
     procedure OnImgSelected(Sender: TObject);
     procedure OnImgViewed(Sender: TObject);
     procedure OnPartImgSelected(Sender: TObject);
@@ -152,6 +171,15 @@ type
     procedure SetPartLabelColor(Sender: TObject);
     procedure SetPartForeColor(Sender: TObject);
     procedure SelectThumbnail(Sender: TObject);
+
+    //解析文件
+    function ConvertFile(AFileName:string;ADownLoadCSFile:Boolean=true):TMemoryStream;
+    procedure AnaFtpInfo(var AFtpIP,AFtpPort,AFtpUser,AFtpPass:string);
+    function GetFtpFile(AFileName:string):TMemoryStream;
+    function GetHttpFile(AFileName:string):TMemoryStream;
+    function AnaSCSFileName(AFileName:string;var AIP,APort,AGUID,AFile:widestring):Boolean;//根据scs文件名解析IP等信息
+    function GetSCSFile(AFileName:string):TMemoryStream;
+    procedure GetSCSFiles(ABeginIndex,AEndIndex:integer);//获取多个内容服务器文件
   protected
     { Protected declarations }
     function  FindLeftThumbnail(curThumbnail:TShareImgThumbnail):TShareImgThumbnail;
@@ -168,9 +196,11 @@ type
     procedure SetRows(AValue:Integer);
     procedure SetCols(AValue:Integer);
     procedure SetThumbMargin(AValue:Integer);
+    procedure SetThumbBorderWidth(AValue:integer);
     procedure SetTimeInterval(AValue:Integer);
     procedure SetShowPart(AValue:Boolean);
     procedure SetPartLabelVisible(AValue:Boolean);
+    procedure SetLabelVisible(AValue:Boolean);
     procedure SetPartAlign(AValue:TAlign);
     procedure SetMagParent(AValue:TWinControl);
     procedure SetPartParent(AValue:TWinControl);
@@ -188,6 +218,8 @@ type
     procedure SetMiddleLineType(Value:integer);
     procedure SetLabelAlign(Value : TLabelAlign);
     procedure SetViewMode(AViewMode:integer);
+    procedure SetLoadThumbnail(Value: integer);
+    procedure AddImage(AFileName:string;AFileStream:TMemoryStream=nil;AHandle:THandle=0;ViewCurImg:Boolean=True);overload;
   public
     { Public declarations }
     AlwaysFocus:Boolean;
@@ -200,6 +232,9 @@ type
     property SelThumbnailIndex : Integer read GetThumbIndex;
     property SelImageIndex : Integer read GetImageIndex;
     property ImageList : TStringList read FImgList write SetImgList;
+    property ThumbList : TList read FThumbList;
+    property FtpList : TStringList read FFtpList write SetFtpList;
+    property LoadThumbnail : integer read FLoadThumbnail write SetLoadThumbnail;
     property nThumbnails : Integer read GetThumbnailCount;
     property nPages : Integer read FPages;
     property CurPage : Integer read FCurrentPage;
@@ -226,12 +261,15 @@ type
     procedure SetThumbnailColor(AThumbIndex:Integer;AColor:TColor);
     procedure SetThumbnailPalette(AThumbIndex:integer;APalette:integer);
     procedure Refresh;overload;
+    procedure Refresh(AImageIndex:integer;ViewRefImage:Boolean=true);overload;
     procedure SetPartRect(ALeft,ATop,AWidth,AHeight:Integer);overload;
     procedure SetPartRect(AthumbIndex,ALeft,ATop,AWidth,AHeight:Integer);overload;
     procedure Clear;
-    procedure AddImage(AFileName:string;AHandle:THandle=0;ViewCurImg:Boolean=True);
-    procedure InsertImage(AImageIndex:Integer;AFileName:string;ViewCurImg:Boolean=True);
-    procedure ReplaceImage(AImageIndex:Integer;AFileName:string;ViewCurImg:Boolean=True);
+    procedure AddImage(AFileName:string;AHandle:THandle;ViewCurImg:Boolean=True);overload;
+    procedure AddImage(AFileName:string;AImgStream:TMemoryStream;ViewCurImg:Boolean=True);overload;
+    procedure AddImage(AFileName:string;ViewCurImg:Boolean=True);overload;
+    procedure InsertImage(AImageIndex:Integer;AFileName:string;ViewCurImg:Boolean=True;AImgStream:TMemoryStream=nil);
+    procedure ReplaceImage(AImageIndex:Integer;AFileName:string;ViewCurImg:Boolean=True;AImgStream:TMemoryStream=nil);
     procedure DeleteImage(AImageIndex: Integer;ARefresh:Boolean=True);
     procedure DeleteSelectImage;
 
@@ -245,6 +283,7 @@ type
     property PartSbx:TScrollBox read FSbxPart;
     property ShowPart:Boolean Read FShowPart Write SetShowPart;
     property PartLabelVisible:Boolean Read FPartLabelVisible Write SetPartLabelVisible;
+    property LabelVisible:Boolean Read FLabelVisible Write SetLabelVisible;
     property PartAlign:TAlign read FPartAlign write SetPartAlign;
     property MagnifierParent:TWinControl read FMagnifierParent write SetMagParent;
     property PartParent:TWinControl read FPartParent write SetPartParent;
@@ -258,6 +297,7 @@ type
     property Interval : Integer read FTimeInterval write SetTimeInterval default 3;
     property ReverseSlide:Boolean Read FReverseSlide Write FReverseSlide;
     property ThumbnailMargin : Integer read FThumbMargin write SetThumbMargin;
+    property ThumbBorderWidth : Integer read FThumbBorderWidth write SetThumbBorderWidth;
     property UseMagnifier : Boolean read FUseMagnifier write SetMagnifier;
     property DbClickViewOneImg : Boolean read FDbClickViewOneImg write FDbClickViewOneImg;
     property RefreshEndViewOneImg : Boolean read FRefreshEndViewOneImg write FRefreshEndViewOneImg;
@@ -277,14 +317,22 @@ type
     property MiddleLineType: integer read FMiddleLineType Write SetMiddleLineType;
     property VALLImage: Boolean read FVALLImage Write FVALLImage;
     property LabelAlign : TLabelAlign read FLabelAlign write SetLabelAlign;
-    property EnterKeySMDBClick : Boolean read FEnterKeySMDBClick write FEnterKeySMDBClick; 
+    property EnterKeySMDBClick : Boolean read FEnterKeySMDBClick write FEnterKeySMDBClick;
+    property ShowSCSError :Boolean read FShowSCSError write FShowSCSError;
+    property DownSCSByPage:Boolean read FDownSCSByPage write FDownSCSByPage;
+    property DefFtpPort:integer read FDefFtpPort Write FDefFtpPort;
+    property FtpTimeOut:integer read FFtpTimeOut Write FFtpTimeOut;
+    property HttpTimeOut:integer read FHttpTimeOut Write FHttpTimeOut;
+    property SCSTimeOut:integer read FSCSTimeOut Write FSCSTimeOut;
+    property SCSIP:string read FSCSIP Write FSCSIP;
+    property SCSPort:integer read FSCSPort Write FSCSPort;
   end;
 
 procedure Register;
 
 implementation
 
-uses fmViewOneImage, uImageBuffer;
+uses fmViewOneImage, uImageBuffer, uContentClientV3;
 
 var
   bLoadingBuffer:Boolean;
@@ -304,12 +352,11 @@ begin
   AlwaysFocus:=True;
   BufferCSList:=TCSList.Create;
   FSelectByMouse:=True;
-  
   FPartParent:=self.Parent;
   FShowPart:=False;
   FKeyProcessing:=False;
   FThumbCreating:=False;
-  FLabelAlign:=alBottom;
+  FLabelAlign:=alSLBottom;
   FEnterKeySMDBClick:=True;
   //自己的属性设置
   //外面如果有onResize事件会冲掉，而且默认2*3，如果 Object Inspector里不是，
@@ -323,7 +370,6 @@ begin
   FlvKey.Align:=alClient;
   FlvKey.OnKeyDown:=OnlvKeyDown;
   FlvKey.OnResize:=OnlvKeyResize;
-
   FSbxPart:=TScrollBox.Create(self);
   FSbxPart.Parent:=FPartParent;
   FSbxPart.Visible:=ShowPart;
@@ -335,7 +381,6 @@ begin
   FPanelPart.BorderStyle:=bsNone;
   FPanelPart.BevelOuter:=bvNone;
   FPanelPart.BevelInner:=bvNone;
-
   FMagnifier:=TShareMagnifier.Create(self);
   FUseMagnifier:=False;
   FXPressMagnifier:=TShareMag.Create(self);
@@ -367,13 +412,15 @@ begin
   FNextBufferList:=TList.Create;
 
   FLoadBuffer:=nil;//TLoadBuffer.Create(False,self,FPanelPreBuffer,FpanelNextBuffer);
-
   //默认缩略图为6个，两行三列
   FRow:=2;
   FCol:=3;
   FThumbMargin:=3;
+  FThumbBorderWidth:=6;
   FPartThumbnailMargin:=2;
   FThumbColor:=clBtnFace;
+
+  FLoadThumbnail:=0;//不显示缩略图
 
   FPopupMenu:=nil;
   FTimer:=TTimer.Create(self);
@@ -386,8 +433,20 @@ begin
   FCurrentPage:=1;
   FPages:=1;
 
+  FidFtp:=nil;
+  FidHttp:=nil;
+  FDefFtpPort:=21;
+  FFtpTimeOut:=30;
+  FHttpTimeOut:=30;
+  FSCSTimeOut:=30;
+  FSCSIP:='';
+  FSCSPort:=0;
+  FShowSCSError:=true;
+  FDownSCSByPage:=true;
   FImgList:=TStringList.Create;
+  FFtpList:=TStringList.Create;
   FThumbList:=TList.Create;
+  self.FLabelVisible:=True;
   CreateThumbnail(self);
 //  Initialize;
   FImgControl:=icImgEdit;
@@ -395,11 +454,45 @@ begin
 end;
 
 destructor TShareIMGSlide.Destroy;
+var
+  i:integer;
+  tmpStream:TMemoryStream;
 begin
 //  self.SetMagnifier(False);
+  try
+    if FidFtp<>nil then
+    begin
+      if FidFtp.Connected then
+        FidFtp.Disconnect;
+      FreeAndNil(FidFtp);
+    end;
+  except
+  end;
+  try
+    if FidHttp<>nil then
+    begin
+      if FidHttp.Connected then
+        FidHttp.Disconnect;
+      FreeAndNil(FidHttp);
+    end;
+  except
+  end; 
   BufferCSList.Free;
   FThumbList.Free;
+  for i:=0 to FImgList.Count-1 do
+  begin
+    try
+      if FImgList.Objects[i]<>nil then
+      begin
+        tmpStream:=TMemoryStream(FImgList.Objects[i]);
+        FreeAndNil(tmpStream);
+        FImgList.Objects[i]:=nil;
+      end;
+    except
+    end;
+  end;
   FImgList.Free;
+  FFtpList.Free;
   try
     FPreBufferList.Free;;
     FNextBufferList.Free;
@@ -506,6 +599,7 @@ begin
         tmpThumb.OnMouseDown:=self.OnMouseDown;
         tmpThumb.Parent:=AParent;
         tmpThumb.SetImgControl(FImgControl);
+        tmpThumb.LoadThumbnail:=self.FLoadThumbnail;
         if AParent=FSbxPart then
         begin
           tmpThumb.ShowPart:=FShowPart;
@@ -551,6 +645,7 @@ begin
         else
         begin
           tmpThumb.ShowPart:=False;
+          tmpThumb.LabelVisible:=FLabelVisible;
           tmpThumb.OnThumbnailSelected:=SelectThumbnail; //OnImgSelected;
           tmpThumb.OnImgViewed:=OnImgViewed;
           tmpThumb.OnSetFileName:=SetPartLabelName;
@@ -611,10 +706,8 @@ begin
         end
         else}
         begin
-
-              if (self.AlwaysFocus) or (self.FSelectByMouse) then
-                FlvKey.SetFocus;
-
+          if (self.AlwaysFocus) or (self.FSelectByMouse) then
+            FlvKey.SetFocus;
           bChange:=True;
           if FThumbSelected <> nil then
             if FThumbSelected<>TShareImgThumbnail(Sender) then  //如果选择的影像与原来的选中影像不同则对thumbnailselected重新赋值
@@ -980,6 +1073,9 @@ begin
         FLoadBuffer.Terminate;
       end;}
 
+      //缓冲SCS文件
+      if self.FDownSCSByPage then
+        self.GetSCSFiles((nThumbnails)*(FCurrentPage-1),(nThumbnails)*(FCurrentPage)-1);
       for i:=0 to nThumbnails-1 do
       begin
         //if FImgControl=icImgEdit then
@@ -1001,12 +1097,6 @@ begin
             begin
               if (FUseBuffer) and (FImgControl=icImagXPress) then
               begin
-                {if FPanelPreBuffer.Tag=FCurrentPage then
-                  TShareImgThumbnail(FThumbList[i]).SethDib(TImagXPress(FPreBufferList[i]).CopyDIB,FImgList[(nThumbnails)*(FCurrentPage-1)+i])
-                else if FPanelNextBuffer.Tag=FCurrentPage then
-                  TShareImgThumbnail(FThumbList[i]).SethDib(TImagXPress(FNextBufferList[i]).CopyDIB,FImgList[(nThumbnails)*(FCurrentPage-1)+i])
-                else
-                  TShareImgThumbnail(FThumbList[i]).ImgFileName:=FImgList[(nThumbnails)*(FCurrentPage-1)+i]; }
                 if TImagXPress(FPreBufferList[i]).Tag=FCurrentPage then
                   TShareImgThumbnail(FThumbList[i]).SethDib(TImagXPress(FPreBufferList[i]).CopyDIB,FImgList[(nThumbnails)*(FCurrentPage-1)+i])
                 else if TImagXPress(FNextBufferList[i]).Tag=FCurrentPage then
@@ -1015,13 +1105,23 @@ begin
                   TShareImgThumbnail(FThumbList[i]).ImgFileName:=FImgList[(nThumbnails)*(FCurrentPage-1)+i];
               end
               else
-                TShareImgThumbnail(FThumbList[i]).ImgFileName:=FImgList[(nThumbnails)*(FCurrentPage-1)+i];
+              begin
+                if FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]=nil then
+                  FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]:=self.ConvertFile(FImgList[(nThumbnails)*(FCurrentPage-1)+i],not FDownSCSByPage);
+                if FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]<>nil then
+                  TShareImgThumbnail(FThumbList[i]).SetStream(TMemoryStream(FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]),FImgList[(nThumbnails)*(FCurrentPage-1)+i],False,False)
+                else
+                  TShareImgThumbnail(FThumbList[i]).ImgFileName:=FImgList[(nThumbnails)*(FCurrentPage-1)+i];
+              end;
             end;
             
             if TShareImgThumbnail(FThumbList[i]).ImgFileName='' then
               TShareImgThumbnail(FThumbList[i]).LabelName:='';
             if FShowPart then
-              TShareImgThumbnail(FPartList[i]).ImgFileName:=TShareImgThumbnail(FThumbList[i]).ImgFileName;
+              if FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]<>nil then
+                TShareImgThumbnail(FPartList[i]).SetStream(TMemoryStream(FImgList.Objects[(nThumbnails)*(FCurrentPage-1)+i]),FImgList[(nThumbnails)*(FCurrentPage-1)+i],False,False)
+              else
+                TShareImgThumbnail(FPartList[i]).ImgFileName:=TShareImgThumbnail(FThumbList[i]).ImgFileName;
           end;
           if Assigned(FOnPageView) then
             FOnPageView(self,i,nThumbnails,(nThumbnails)*(FCurrentPage-1)+i);
@@ -1136,6 +1236,12 @@ begin
    Inc(FPages);
 end;
 
+procedure TShareIMGSlide.SetFtpList(AFtpList: TStringList);
+begin
+  FFtpList.Clear;
+  FFtpList.Assign(AFtpList);  //此处不能用等于，否则指针会出问题
+end;
+
 procedure TShareIMGSlide.SetPopupMenu(pop: TPopupMenu);
 var
   i:integer;
@@ -1154,7 +1260,7 @@ function TShareIMGSlide.GetThumbByIndex(
 begin
   result:=nil;
   if (AIndex>=0) and (AIndex<FThumbList.Count) then
-    result:=FThumbList[AIndex]; 
+    result:=FThumbList[AIndex];
 end;
 
 function TShareIMGSlide.GetThumbnailCount: integer;
@@ -1209,18 +1315,41 @@ end;
 
 procedure TShareIMGSlide.Refresh;
 var
-  oldPage:integer;
+  oldPage,i:integer;
+  tmpStream:TMemoryStream;
 begin
   inherited;
   FPages:=(FImgList.Count div FThumbList.Count);
   if FImgList.Count mod FThumbList.Count <>0 then
    Inc(FPages);
   oldPage:=FCurrentPage;
+  for i:=(nThumbnails)*(FCurrentPage-1) to (nThumbnails)*(FCurrentPage)-1 do
+    if (i>=0) and (i<self.FImgList.Count) then
+    begin
+      tmpStream:=TMemoryStream(self.FImgList.Objects[i]);
+      if tmpStream<>nil then FreeAndNil(tmpStream);
+      FImgList.Objects[i]:=nil;
+    end;
+
   FCurrentPage:=-1;
   ViewPage(oldPage);
   FSelectByMouse:=False;
   SelectThumbnail(FThumbSelected);
 end;
+
+procedure TShareIMGSlide.Refresh(AImageIndex: integer;ViewRefImage:Boolean=true);
+begin
+  if (AImageIndex>=0) and (AImageIndex<FImgList.Count) then
+  begin
+    if FImgList.Objects[AImageIndex]<>nil then
+      try
+        TMemoryStream(FImgList.Objects[AImageIndex]).Free;
+        FImgList.Objects[AImageIndex]:=nil;
+      except
+      end;
+    self.ReplaceImage(AImageIndex,FImgList[AImageIndex],ViewRefImage,nil);
+  end;
+end;   
 
 procedure TShareIMGSlide.SetRows(AValue: Integer);
 begin
@@ -1257,6 +1386,24 @@ begin
   end;
 end;
 
+procedure TShareIMGSlide.SetThumbBorderWidth(AValue: Integer);
+var
+  i:integer;
+begin
+  if FThumbBorderWidth=AValue then
+    Exit;
+  if AValue<0 then exit;
+  FThumbBorderWidth:=AValue;
+  //如果不显示局部影像,那么赋值后不做界面处理
+  try
+    for i:=0 to FThumbList.Count-1 do
+    begin
+      TShareImgThumbnail(FThumbList.Items[i]).ThumbnailMargin:=AValue;
+    end;
+  except
+  end;
+end;
+
 procedure TShareIMGSlide.SetTimeInterval(AValue: Integer);
 begin
   if AValue>0 then
@@ -1285,7 +1432,8 @@ begin
       FSbxPart.Enabled:=True;
       CreateThumbnail(FSbxPart);
       for i:=0 to FThumbList.Count-1 do
-        TShareImgThumbnail(FPartList.Items[i]).ImgFileName:=TShareImgThumbnail(FThumbList.Items[i]).ImgFileName;
+       TShareImgThumbnail(FPartList.Items[i]).SetStream(TShareImgThumbnail(FThumbList.Items[i]).ImgStream,TShareImgThumbnail(FThumbList.Items[i]).ImgFileName,false,false);
+        //TShareImgThumbnail(FPartList.Items[i]).ImgFileName:=TShareImgThumbnail(FThumbList.Items[i]).ImgFileName;
     end
     else
     begin
@@ -1315,6 +1463,20 @@ begin
   try
     for i:=0 to FThumbList.Count-1 do
       TShareImgThumbnail(FPartList.Items[i]).LabelVisible:=AValue;
+  except
+  end;
+end;
+
+procedure TShareIMGSlide.SetLabelVisible(AValue:Boolean);
+var
+  i:integer;
+begin
+  if FLabelVisible=AValue then
+    Exit;
+  FLabelVisible:=AValue;
+  try
+    for i:=0 to FThumbList.Count-1 do
+      TShareImgThumbnail(FThumbList.Items[i]).LabelVisible:=AValue;
   except
   end;
 end;
@@ -1398,6 +1560,7 @@ end;
 procedure TShareIMGSlide.Clear;
 var
   i:integer;
+  tmpStream:TMemoryStream;
 begin
   for i:=0 to FThumbList.Count-1 do
   begin
@@ -1405,9 +1568,18 @@ begin
     if FShowPart then
       TShareImgThumbnail(FPartList.Items[i]).Clear;
   end;
-  //FThumbList.Clear;
-  //if FShowPart then
-  //  FPartList.Clear;
+  for i:=0 to FImgList.Count-1 do
+  begin
+    try
+      if FImgList.Objects[i]<>nil then
+      begin
+        tmpStream:=TMemoryStream(FImgList.Objects[i]);
+        FreeAndNil(tmpStream);
+        FImgList.Objects[i]:=nil;
+      end;
+    except
+    end;
+  end;
   FImgList.Clear;
   FCurrentPage:=1;
   FPages:=1;
@@ -1421,7 +1593,24 @@ begin
     TShareImgThumbnail(FPartList[AThumbIndex]).ImagePalette:=APalette;
 end;
 
-procedure TShareIMGSlide.AddImage(AFileName: string;AHandle:THandle=0;ViewCurImg:Boolean=True);
+procedure TShareIMGSlide.AddImage(AFileName: string;AHandle:THandle;ViewCurImg:Boolean=True);
+begin
+  self.AddImage(AFilename,nil,AHandle,ViewCurImg);
+end;
+
+procedure TShareIMGSlide.AddImage(AFileName: string;
+  AImgStream: TMemoryStream; ViewCurImg: Boolean);
+begin
+  self.AddImage(AFilename,AImgStream,0,ViewCurImg);
+end;
+
+procedure TShareIMGSlide.AddImage(AFileName: string;ViewCurImg: Boolean=true);
+begin
+  self.AddImage(AFilename,self.ConvertFile(AFileName),0,ViewCurImg);
+end;
+
+procedure TShareIMGSlide.AddImage(AFileName: string;
+  AFileStream: TMemoryStream; AHandle: THandle; ViewCurImg: Boolean);
 var
   i:integer;
   bAddPosFound:Boolean;
@@ -1429,7 +1618,8 @@ begin
   try
     if self.LockWindow then
       LockWindowUpdate(self.Handle);
-    FImgList.Add(AFileName);
+    //FImgList.Add(AFileName);
+    FImgList.AddObject(AFileName,AFileStream);
     FPages:=(FImgList.Count div FThumbList.Count);
     if FImgList.Count mod FThumbList.Count <>0 then
       Inc(FPages);
@@ -1438,6 +1628,7 @@ begin
         Exit;
     if FCurrentPage<FPages then
     begin
+      //如果原来是最后一页，AddImage后不是最后一页了，那么证明最后一页只有一张影像，只显示第一个thumbnail增加显示速度
       if FImgList.Count mod (nThumbnails) =1 then
       begin
         FCurrentPage:=FPages;
@@ -1448,9 +1639,9 @@ begin
             begin
               if (AHandle=0) or (FImgControl=icImgEdit) then
               begin
-                TShareImgThumbnail(FThumbList[0]).ImgFileName:=AFileName;
+                TShareImgThumbnail(FThumbList[i]).SetStream(AFileStream,AFileName,false,false);
                 if FShowPart then
-                  TShareImgThumbnail(FPartList[0]).ImgFileName:=AFileName;
+                  TShareImgThumbnail(FPartList[i]).SetStream(AFileStream,AFileName,false,false);
               end
               else
               begin
@@ -1484,7 +1675,7 @@ begin
       else
         ViewImage(FImgList.Count-1)
     end
-    else
+    else //原来就是最后一Page，且添加后总Page没变化，证明最后一个Page上Thunmbnail没有显示满，直接找到第一个空的显示新增的
     begin
       bAddPosFound:=False;
       for i:=0 to nThumbnails-1 do
@@ -1494,9 +1685,12 @@ begin
           try
             if (AHandle=0) or (FImgControl=icImgEdit) then
             begin
-              TShareImgThumbnail(FThumbList[i]).ImgFileName:=AFileName;
+              TShareImgThumbnail(FThumbList[i]).SetStream(AFileStream,AFileName,false,false);
               if FShowPart then
-                TShareImgThumbnail(FPartList[i]).ImgFileName:=AFileName;
+                TShareImgThumbnail(FPartList[i]).SetStream(AFileStream,AFileName,false,false);
+              //TShareImgThumbnail(FThumbList[i]).ImgFileName:=AFileName;
+              //if FShowPart then
+              //  TShareImgThumbnail(FPartList[i]).ImgFileName:=AFileName;
             end
             else
             begin
@@ -1504,12 +1698,8 @@ begin
               if FShowPart then
                 TShareImgThumbnail(FPartList[i]).SethDib(AHandle,AFileName);
             end;
-            //OnImgSelected(TShareImgThumbnail(FThumbList[i]));
             FSelectByMouse:=False;
             SelectThumbnail(TShareImgThumbnail(FThumbList[i]));
-            //if ViewCurImg then
-            //  if Assigned(FOnPageView) then
-            //    FOnPageView(self,i,nThumbnails,(nThumbnails)*(FCurrentPage-1)+i);
           except
             on E:Exception do
             begin
@@ -1546,12 +1736,21 @@ begin
       ithumb:=nThumbnails-1
     else
       iPage:=iPage+1;
+    if FImgList.Objects[AImageIndex]<>nil then
+    begin
+      TMemoryStream(FImgList.Objects[AImageIndex]).Free;
+      FImgList.Objects[AImageIndex]:=nil;
+    end;
     FImgList.Delete(AImageIndex);
     FPages:=(FImgList.Count div FThumbList.Count);
     if FImgList.Count mod FThumbList.Count <>0 then
      Inc(FPages);
-    if (iPage<>FCurrentPage) or (not ARefresh) then    //如果删除的不是当前显示页那么不用更新显示
-      Exit;
+    //删除的是当前页之前的，必须刷新
+    if iPage<=FCurrentPage then
+    else if not ARefresh then exit;
+    {if FCurrentPage>FPages then
+    else if (iPage<>FCurrentPage) or (not ARefresh) then    //如果删除的是当前显示页后面的那么不用更新显示
+      Exit; }
     try
       if self.LockWindow then
         LockwindowUpdate(self.handle);
@@ -1562,16 +1761,19 @@ begin
         ViewImage(FImgList.Count-1)
       else
       begin
-        for i:=0{ithumb} to nThumbnails-1 do
+        for i:=0 to nThumbnails-1 do
         begin
           try
             if i>=iThumb then
             begin
               if i+(FCurrentPage-1)*nThumbnails<FImgList.Count then
               begin
-                TShareImgThumbnail(FThumbList[i]).ImgFileName:=FImgList[i+(FCurrentPage-1)*nThumbnails];
+                if FImgList.Objects[i+(FCurrentPage-1)*nThumbnails]=nil then
+                  FImgList.Objects[i+(FCurrentPage-1)*nThumbnails]:=self.ConvertFile(FImgList[i+(FCurrentPage-1)*nThumbnails]);
+
+                TShareImgThumbnail(FThumbList[i]).SetStream(TMemoryStream(FImgList.Objects[i+(FCurrentPage-1)*nThumbnails]),FImgList[i+(FCurrentPage-1)*nThumbnails],False,false);
                 if FShowPart then
-                  TShareImgThumbnail(FPartList[i]).ImgFileName:=FImgList[i+(FCurrentPage-1)*nThumbnails];
+                  TShareImgThumbnail(FPartList[i]).SetStream(TMemoryStream(FImgList.Objects[i+(FCurrentPage-1)*nThumbnails]),FImgList[i+(FCurrentPage-1)*nThumbnails],False,false);
               end
               else
               begin
@@ -1607,7 +1809,7 @@ begin
 end;
 
 procedure TShareIMGSlide.InsertImage(AImageIndex: Integer;
-  AFileName: string; ViewCurImg:Boolean=True);
+  AFileName: string; ViewCurImg:Boolean=True;AImgStream:TMemoryStream=nil);
 var
   i:integer;
   ithumb,ipage:integer;
@@ -1620,14 +1822,19 @@ begin
     ithumb:=nThumbnails-1
   else
     iPage:=iPage+1;
-  FImgList.Insert(AImageIndex,AFileName);
+  if AImgStream<>nil then
+    FImgList.InsertObject(AImageIndex,AFileName,AImgStream)
+  else
+    FImgList.InsertObject(AImageIndex,AFileName,self.ConvertFile(AFileName));
   FPages:=(FImgList.Count div FThumbList.Count);
   if FImgList.Count mod FThumbList.Count <>0 then
     Inc(FPages);
   if iPage<>FCurrentPage then  //如果不是插入到当前页
   begin
-    if ViewCurImg then
-      ViewImage(AImageIndex);
+    if ViewCurImg then  //如果需要显示当前影响
+      ViewImage(AImageIndex)
+    else if iPage<FCurrentPage then  //如果不需要显示插入的影像，且插入的位置是当前页之前，那么需要刷新当前页
+      ViewPage(FCurrentPage);
     Exit;
   end;
   try
@@ -1642,29 +1849,29 @@ begin
         try
           if i>ithumb then
           begin
-            TShareImgThumbnail(FThumbList[i]).ImgFileName:=TShareImgThumbnail(FThumblist[i-1]).ImgFileName;
+            //TShareImgThumbnail(FThumbList[i]).ImgFileName:=TShareImgThumbnail(FThumblist[i-1]).ImgFileName;
+            TShareImgThumbnail(FThumbList[i]).SetStream(TShareImgThumbnail(FThumblist[i-1]).ImgStream,TShareImgThumbnail(FThumblist[i-1]).ImgFileName,false,false);
             if TShareImgThumbnail(FThumbList[i]).ImgFileName='' then
               TShareImgThumbnail(FThumbList[i]).LabelName:='';
             if FShowPart then
-              TShareImgThumbnail(FPartList[i]).ImgFileName:=TShareImgThumbnail(FPartList[i-1]).ImgFileName;
+              TShareImgThumbnail(FPartList[i]).SetStream(TShareImgThumbnail(FPartList[i-1]).ImgStream,TShareImgThumbnail(FPartList[i-1]).ImgFileName,False,false);
           end
           else if i=ithumb then
           begin
             try
-              TShareImgThumbnail(FThumbList[ithumb]).ImgFileName:=AFileName;
+              //TShareImgThumbnail(FThumbList[ithumb]).ImgFileName:=AFileName;
+              TShareImgThumbnail(FThumbList[ithumb]).SetStream(TMemoryStream(FImgList.Objects[AImageIndex]),AFileName,false,false);
               if TShareImgThumbnail(FThumbList[ithumb]).ImgFileName='' then
                 TShareImgThumbnail(FThumbList[ithumb]).LabelName:='';
               if FShowPart then
-                TShareImgThumbnail(FPartList[ithumb]).ImgFileName:=AFileName;
-              //self.OnImgSelected(TShareImgThumbnail(FThumbList[ithumb]));
+                TShareImgThumbnail(FPartList[ithumb]).SetStream(TMemoryStream(FImgList.Objects[AImageIndex]),AFileName,false,false);
               FSelectByMouse:=False;
               SelectThumbnail(TShareImgThumbnail(FThumbList[ithumb]));
             except
             end;
           end;
-          //if ViewCurImg then
-            if Assigned(FOnPageView) then
-              FOnPageView(self,i,nThumbnails,(nThumbnails)*(FCurrentPage-1)+i);
+          if Assigned(FOnPageView) then
+            FOnPageView(self,i,nThumbnails,(nThumbnails)*(FCurrentPage-1)+i);
         except
           on E:Exception do
           begin
@@ -1681,7 +1888,7 @@ begin
 end;
 
 procedure TShareIMGSlide.ReplaceImage(AImageIndex: Integer;
-  AFileName: string; ViewCurImg: Boolean);
+  AFileName: string; ViewCurImg: Boolean=true;AImgStream:TMemoryStream=nil);
 var
   i:integer;
   ithumb,iPage:integer;
@@ -1694,7 +1901,19 @@ begin
       ithumb:=nThumbnails-1
     else
       iPage:=iPage+1;
+
+    if FImgList.Objects[AImageIndex]<>nil then
+      try
+        TMemoryStream(FImgList.Objects[AImageIndex]).Free;
+        FImgList.Objects[AImageIndex]:=nil;
+      except
+      end;
     FImgList[AImageIndex]:=AFileName;
+    if AImgStream<>nil then
+      FImgList.Objects[AImageIndex]:=AImgStream
+    else
+      FImgList.Objects[AImageIndex]:=self.ConvertFile(AFileName);
+
     if not ViewCurImg then
     if (iPage<>FCurrentPage) then    //如果删除的不是当前显示页那么不用更新显示
       Exit;
@@ -1706,9 +1925,9 @@ begin
         if self.LockWindow then
           LockwindowUpdate(self.handle);
         try
-          TShareImgThumbnail(FThumbList[ithumb]).ImgFileName:=AFileName;
+          TShareImgThumbnail(FThumbList[ithumb]).SetStream(TMemoryStream(FImgList.Objects[AImageIndex]),AFileName,false,false);
           if FShowPart then
-            TShareImgThumbnail(FPartList[ithumb]).ImgFileName:=AFileName;
+            TShareImgThumbnail(FPartList[ithumb]).SetStream(TMemoryStream(FImgList.Objects[AImageIndex]),AFileName,false,false);
           if AFileName='' then
             TShareImgThumbnail(FThumbList[ithumb]).LabelName:='';
         except
@@ -2307,4 +2526,412 @@ begin
   FViewMode:=AViewMode;
 end;
 
+procedure TShareIMGSlide.SetLoadThumbnail(Value: integer);
+var
+  i:integer;
+begin
+  if self.FLoadThumbnail=Value then exit;
+  FLoadThumbnail:=Value;
+  for i:=0 to self.nThumbnails-1 do
+    self.ThumbnailList[i].LoadThumbnail:=Value;
+end;
+
+function TShareIMGSlide.ConvertFile(AFileName: string;ADownLoadCSFile:Boolean=true): TMemoryStream;
+begin
+  result:=nil;
+  //目前支持FTP、Http、SCS(ShareContentServer)
+  try
+    if SameText(Copy(AFileName,1,6),'ftp://') then
+      result:=GetFtpFile(AFileName)
+    else if SameText(Copy(AFileName,1,7),'http://') then
+      result:=GetHttpFile(AFileName)
+    else if (SameText(Copy(AFileName,1,6),'SCS:\\')) and (ADownLoadCSFile) then
+      result:=GetSCSFile(AFileName)
+    else
+      result:=nil;
+  except
+  end;
+end;
+
+procedure TShareIMGSlide.AnaFtpInfo(var AFtpIP, AFtpPort, AFtpUser,
+  AFtpPass: string);
+var
+  i,iPos:integer;
+  AFtpInfo,sUser,sPass,sIP,sPort:string;
+begin
+  try
+    if AFtpIP='' then exit;
+    //默认格式为：用户名:密码@地址:端口
+    for i:=0 to self.FFtpList.Count-1 do
+    begin
+      //取出ftp地址等信息
+      AFtpInfo:=trim(FFtpList[i]);
+      iPos:=Pos('@',AFtpInfo);
+      if iPos>0 then
+      begin
+        sUser:=Copy(AFtpInfo,1,iPos-1); //用户+密码
+        sIP:=Copy(AFtpInfo,iPos+1,Length(AFtpInfo));//IP+Port
+        iPos:=Pos(':',sUser);
+        if iPos>0 then
+        begin
+          sPass:=Copy(sUser,iPos+1,Length(sUser));//密码
+          sUser:=Copy(sUser,1,iPos-1);//用户
+        end;
+      end
+      else
+        sIP:=AFtpInfo;//IP+Port
+      //解析IP和Port
+      iPos:=Pos(':',sIP);
+      if iPos>0 then
+      begin
+        sPort:=Copy(sIP,iPos+1,Length(sIP));//端口
+        sIP:=Copy(sIP,1,iPos-1);//IP
+      end;
+      //比较
+      if SameText(AFtpIP,sIP) then
+      begin
+        if AFtpPort='' then
+        begin
+          AFtpPort:=sPort;
+          AFtpUser:=sUser;
+          AFtpPass:=sPass;
+          exit;
+        end
+        else if SameText(AFtpPort,sPort) then
+        begin
+          AFtpUser:=sUser;
+          AFtpPass:=sPass;
+          exit;
+        end;
+      end;
+    end;
+  finally
+    if AFtpPort='' then AFtpPort:=inttostr(FDefFtpPort);
+    if (AFtpUser='') and (AFtpPass='') then
+    begin
+      AFtpUser:='anonymous';
+      AFtpPass:='anonymous';
+    end;
+  end;
+end;
+
+function TShareIMGSlide.GetFtpFile(AFileName: string): TMemoryStream;
+var
+  sUser,sPass,sIP,sPort:string;
+  AFtpFile,AFtpInfo:string;
+  iPos:integer;
+  tmpStream:TMemoryStream;
+begin
+  //全路径格式为：ftp://用户名:密码@地址:端口
+  result:=nil;
+  try
+    try
+      sUser:='';
+      sPass:='';
+      sIP:='';
+      sPort:='';
+      tmpStream:=nil;
+      if not SameText(Copy(AFileName,1,6),'ftp://') then exit;
+      //去掉ftp头
+      AFileName:=trim(Copy(AFileName,7,Length(AFileName)));
+      iPos:=Pos('/',AFileName);
+      if iPos<=0 then exit;
+      //取出文件在ftp的目录结构
+      AFtpFile:=trim(Copy(AFileName,iPos+1,Length(AFileName)));
+      //取出ftp地址等信息
+      AFtpInfo:=trim(Copy(AFileName,1,iPos-1));
+      iPos:=Pos('@',AFtpInfo);
+      if iPos>0 then
+      begin
+        sUser:=Copy(AFtpInfo,1,iPos-1); //用户+密码
+        sIP:=Copy(AFtpInfo,iPos+1,Length(AFtpInfo));//IP+Port
+        iPos:=Pos(':',sUser);
+        if iPos>0 then
+        begin
+          sPass:=Copy(sUser,iPos+1,Length(sUser));//密码
+          sUser:=Copy(sUser,1,iPos-1);//用户
+        end;
+      end
+      else
+        sIP:=AFtpInfo;//IP+Port
+      //解析IP和Port
+      iPos:=Pos(':',sIP);
+      if iPos>0 then
+      begin
+        sPort:=Copy(sIP,iPos+1,Length(sIP));//端口
+        sIP:=Copy(sIP,1,iPos-1);//IP
+      end;
+      //解析FTP信息
+      AnaFtpInfo(sIP,sPort,sUser,sPass);
+      //创建控件
+      if self.FidFtp=nil then
+        self.FidFtp:=TidFtp.Create(self);
+      //长连接，判断是否需要重连
+      if self.FidFtp.Connected then
+      begin
+        if (not SameText(self.FidFtp.Username,sUser)) or (not SameText(self.FidFtp.Password,sPass))
+          or (not SameText(self.FidFtp.Host,sIP)) or (self.FidFtp.Port<>strtointdef(sPort,FDefFtpPort)) then
+          self.FidFtp.Disconnect;
+      end;
+      //连接
+      if not self.FidFtp.Connected then
+      begin
+        self.FidFtp.Host:=sIP;
+        self.FidFtp.Port:=StrtoIntDef(sPort,FDefFtpPort);
+        self.FidFtp.Username:=sUser;
+        self.FidFtp.Password:=sPass;
+        self.FidFtp.Connect(true,FFtpTimeOut);
+      end;
+      //下载文件
+      if not self.FidFtp.Connected then exit;
+      tmpStream:=TMemoryStream.Create;
+      //为了防止异常断开，Ftp不知道，Connected还是true，这里手工断下
+      try
+        self.FidFtp.Get(AFtpFile,tmpStream);
+      except
+        if (self.FidFtp<>nil) and (self.FidFtp.Connected) then
+          self.FidFtp.Disconnect;
+        FidFtp.Connect(true,FFtpTimeOut);
+        self.FidFtp.Get(AFtpFile,tmpStream);
+      end;
+      result:=tmpStream;
+    finally
+      if result=nil then
+        if tmpStream<>nil then FreeAndNil(tmpStream);
+    end;
+  except
+  end;
+end;
+
+function TShareIMGSlide.GetHttpFile(AFileName: string): TMemoryStream;
+var
+  tmpStream:TMemoryStream;
+begin
+  //只支持格式为：http://地址:端口
+  result:=nil;
+  try
+    try
+      tmpStream:=nil;
+      if not SameText(Copy(AFileName,1,7),'http://') then exit;
+      //创建控件
+      if self.FidHttp=nil then
+        self.FidHttp:=TidHttp.Create(self);
+      self.FidHttp.ConnectTimeout:=FHttpTimeOut;
+      //下载文件
+      tmpStream:=TMemoryStream.Create;
+      self.FidHttp.Get(AFileName,tmpStream);
+      result:=tmpStream;
+    finally
+      if result=nil then
+        if tmpStream<>nil then FreeAndNil(tmpStream);
+    end;
+  except
+  end;
+end;
+
+function TShareIMGSlide.AnaSCSFileName(AFileName:string;var AIP,APort,AGUID,AFile:widestring):Boolean;
+var
+  sIP,sPort,sGUID,sFile,sIPInfo,sGDInfo:string;
+  i:integer;
+begin
+  result:=False;
+  try
+    try
+      // 格式 SCS:\\IP:Port\GUID\FileName或者 SCS:\\GUID\FileName
+      AIP:='';APort:='';AGUID:='';AFile:='';
+      //由于Length对于widestring和string来说，出现中文名时，长度不一致，因此都按照string来做，最后再赋为widestring
+      if not SameText(Copy(AFileName,1,6),'scs:\\') then exit;
+      sIPInfo:=trim(Copy(AFileName,7,Length(AFileName)));
+      i:=Pos('\',sIPInfo);
+      if i<=0 then exit;
+      sGDInfo:=Copy(sIPInfo,i+1,Length(sIPInfo));
+      sIPInfo:=Copy(sIPInfo,1,i-1);
+
+      i:=Pos(':',sIPInfo);
+      if i<=0 then
+      begin
+        //说明是SCS:\\GUID\FileName
+        sIP:=self.FSCSIP;
+        sPort:=inttostr(self.FSCSPort);
+        sGUID:=sIPInfo;
+        sFile:=sGDInfo;
+      end
+      else
+      begin
+        sIP:=Copy(sIPInfo,1,i-1);
+        sPort:=Copy(sIPInfo,i+1,Length(sIPInfo));
+
+        i:=Pos('\',sGDInfo);
+        if i<=0 then exit;
+        sFile:=Copy(sGDInfo,i+1,Length(sGDInfo));
+        sGUID:=Copy(sGDInfo,1,i-1);
+      end;
+
+      AIP:=sIP;
+      APort:=sPort;
+      AGUID:=sGUID;
+      AFile:=sFile;
+      
+      result:=true;
+    finally
+    end;
+  except
+  end;
+end;
+
+function TShareIMGSlide.GetSCSFile(AFileName: string): TMemoryStream;
+var
+  tmpStream:TStream;
+  tmpresult:TMemoryStream;
+  sIP,sPort,sGUID,sFile,sErrorMsg:widestring;
+  sErr:string;
+begin
+  result:=nil;
+  try
+    try
+      // 格式 SCS:\\IP:Port\GUID\FileName 或者 SCS:\\GUID\FileName
+      tmpStream:=nil;
+      tmpresult:=nil;
+      if not self.AnaSCSFileName(AFileName,sIP,sPort,sGUID,sFile) then exit;
+
+      tmpStream := GetFileToStream(sGUID,sFile, sErrorMsg,sIP, StrToIntDef(sPort, 0),FSCSTimeOut*1000,FSCSTimeOut*1000);
+      if (tmpStream<>nil) and (sErrorMsg='') then
+      begin
+        tmpResult:=TMemoryStream.Create;
+        tmpresult.CopyFrom(tmpStream,tmpStream.Size);
+        result:=tmpresult;
+      end
+      else if FShowSCSError then
+      begin
+        //弹框显示错误时需要用string，不然是乱码
+        sErr:=sErrorMsg;
+        Application.MessageBox(pChar(sErr),'错误',MB_OK+MB_ICONERROR);
+      end;
+    finally
+      if tmpStream<>nil then FreeAndNil(tmpStream);
+      if result=nil then
+        if tmpresult<>nil then FreeAndNil(tmpresult);
+    end;
+  except
+    on E:Exception do
+      if FShowSCSError then Application.MessageBox(pChar('显示异常：'+e.Message),'错误',MB_OK+MB_ICONERROR);
+  end;
+end;
+
+procedure TShareIMGSlide.GetSCSFiles(ABeginIndex,AEndIndex:integer);
+  type TSCSFilesInfo=record
+    IP,Port,GUID:widestring;
+    ImgIndex,Files:TStringList;
+    IsError:Boolean;
+  end;
+  PSCSFilesInfo=^TSCSFilesInfo;
+var
+  sIP,sPort,sGUID,sFile,sErrorMsg:widestring;
+  sErr,AFileName:string;
+  i,j,idIdx:integer;
+  tmpSCSFiles:PSCSFilesInfo;
+  slDownList:TStringList;
+  tmpStream:TStream;
+  tmpMMStream:TMemoryStream;
+begin
+  try
+    try
+      slDownList:=TStringList.Create;
+
+      for i:=ABeginIndex to AEndIndex do
+      begin
+        if (i<0) or (i>=self.FImgList.Count) then continue; //超过边界不做处理
+        if FImgList.Objects[i]<>nil then continue;//已经下载过的不再下载
+        AFileName:=FImgList[i];
+        // 格式 SCS:\\IP:Port\GUID\FileName或者 SCS:\\GUID\FileName
+        if not self.AnaSCSFileName(AFileName,sIP,sPort,sGUID,sFile) then continue; //不是scs的或者解析不出来的不作处理
+
+        //根据IP、Port、GUID分组
+        idIdx:=slDownList.IndexOf(sIP+'_'+sPort+'_'+sGUID);
+        if idIdx<0 then
+        begin
+          New(tmpSCSFiles);
+          tmpSCSFiles.IP:=sIP;
+          tmpSCSFiles.Port:=sPort;
+          tmpSCSFiles.GUID:=sGUID;
+          tmpSCSFiles.IsError:=false;
+          tmpSCSFiles.ImgIndex:=TStringList.Create;
+          tmpSCSFiles.Files:=TStringList.Create;
+          sldownList.AddObject(sIP+'_'+sPort+'_'+sGUID,Pointer(tmpSCSFiles));
+        end
+        else
+          tmpSCSFiles:=PSCSFilesInfo(slDownList.Objects[idIdx]);
+        tmpSCSFiles.Files.Add(sFile);
+        tmpSCSFiles.ImgIndex.Add(inttostr(i));
+      end;
+      for i:=0 to slDownList.Count-1 do
+      begin
+        tmpSCSFiles:=PSCSFilesInfo(slDownList.Objects[i]);
+        if GetFileListToStreamEx(tmpSCSFiles.GUID,tmpSCSFiles.Files, sErrorMsg,true,tmpSCSFiles.IP, StrToIntDef(tmpSCSFiles.Port, 0),FSCSTimeOut*1000,FSCSTimeOut*1000) then
+        begin
+          for j:=0 to tmpSCSFiles.Files.Count-1 do
+          begin
+            //self.FImgList.Objects[strtoint(tmpSCSFiles.ImgIndex[j])]:=tmpSCSFiles.Files.Objects[j];
+            tmpStream:=TStream(tmpSCSFiles.Files.Objects[j]);
+            if tmpStream<>nil then
+            begin
+              if (tmpStream.Size>0) then
+              begin
+                tmpMMStream:=TMemoryStream.Create;
+                tmpMMStream.CopyFrom(tmpStream,tmpStream.Size);
+                self.FImgList.Objects[strtoint(tmpSCSFiles.ImgIndex[j])]:=tmpMMStream;
+              end
+              else if FShowSCSError then
+              begin
+                //弹框显示错误时需要用string，不然是乱码
+                tmpSCSFiles.IsError:=true;
+                sErr:='下载'+AFileName+'失败，大小为0';
+                Application.MessageBox(pChar(sErr),'错误',MB_OK+MB_ICONERROR);
+              end;
+            end;
+          end;
+          //个别文件下载失败，也返回成功，但是要提示错误信息
+          if (FShowSCSError) and (trim(sErrorMsg)<>'') then
+          begin
+            sErr:=sErrorMsg;
+            Application.MessageBox(pChar(sErr),'错误',MB_OK+MB_ICONERROR);
+          end;
+        end
+        else if FShowSCSError then
+        begin
+          //弹框显示错误时需要用string，不然是乱码
+          tmpSCSFiles.IsError:=true;
+          sErr:=sErrorMsg;
+          Application.MessageBox(pChar(sErr),'错误',MB_OK+MB_ICONERROR);
+        end;
+      end;
+    finally
+      if slDownList<>nil then
+      begin
+        for i:=0 to slDownList.Count-1 do
+        begin
+          tmpSCSFiles:=PSCSFilesInfo(slDownList.Objects[i]);
+          //if tmpSCSFiles.IsError then
+            for j:=0 to tmpSCSFiles.Files.Count-1 do
+              if tmpSCSFiles.Files.Objects[j]<>nil then
+              begin
+                tmpStream:=TStream(tmpSCSFiles.Files.Objects[j]);
+                FreeAndNil(tmpStream);
+                tmpSCSFiles.Files.Objects[j]:=nil;
+              end;
+          tmpSCSFiles.Files.Free;
+          tmpSCSFiles.ImgIndex.Free;
+          DisPose(tmpSCSFiles);
+        end;
+
+        slDownList.Free;
+      end;
+    end;
+  except
+    on E:Exception do
+      if FShowSCSError then Application.MessageBox(pChar('显示异常：'+e.Message),'错误',MB_OK+MB_ICONERROR);
+  end;
+end;
+
 end.
+
